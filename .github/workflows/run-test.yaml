@@ -1,20 +1,21 @@
 name: Run tests
 
 on:
-  # run on push in main or rel_* branches excluding changes are only on doc or example folders
-  push:
-    branches:
-      - main
-      - "rel_*"
-      # branches used to test the workflow
-      - "workflow_test_*"
-    paths-ignore:
-      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "pytest selector passed through tox posargs (empty = full suite)"
+        required: false
+        default: ""
+
+env:
+  PIP_INDEX_URL: https://:2022-11-15T14:37:53.675556Z@time-machines-pypi.sealsecurity.io/
 
 jobs:
   run-test:
     name: ${{ matrix.python-version }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       # run this job using this matrix
       matrix:
@@ -33,6 +34,13 @@ jobs:
           # See https://github.com/bbangert/beaker/pull/213
           - os: "windows-latest"
             python-version: "3.10"
+          # no CPython 3.7 build for ubuntu-24.04; see include
+          - os: "ubuntu-latest"
+            python-version: "3.7"
+
+        include:
+          - os: "ubuntu-22.04"
+            python-version: "3.7"
 
       fail-fast: false
 
@@ -41,17 +49,48 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v2
 
+      # no arm64 CPython 3.7 exists; run the x64 python.org build under Rosetta
+      - name: Set up python 3.7 (x64, macOS)
+        if: matrix.os == 'macos-latest' && matrix.python-version == '3.7'
+        run: |
+          curl -sSfLo /tmp/python.pkg https://www.python.org/ftp/python/3.7.9/python-3.7.9-macosx10.9.pkg
+          sudo installer -pkg /tmp/python.pkg -target /
+          PYBIN=/Library/Frameworks/Python.framework/Versions/3.7/bin
+          sudo ln -sf python3 $PYBIN/python
+          sudo ln -sf pip3 $PYBIN/pip
+          echo "$PYBIN" >> $GITHUB_PATH
+
       - name: Set up python
-        uses: actions/setup-python@v2
+        if: ${{ !(matrix.os == 'macos-latest' && matrix.python-version == '3.7') }}
+        uses: MatteoH2O1999/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
           architecture: ${{ matrix.architecture }}
+          cache-build: true
+          allow-build: allow
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade tox setuptools
+          # cap setuptools at the release-era version: newer toolcache
+          # setuptools needs packaging>=22, which the time machine predates
+          pip install --upgrade tox "setuptools<=65.5.1"
           pip list
 
       - name: Run tests
-        run: tox
+        run: tox -- ${{ inputs.test-filter }}
+
+      - name: Build sdist and wheel
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+        run: |
+          pip install build
+          sed -i 's/^tag_build = dev$/tag_build =/' setup.cfg
+          python -m build
+
+      - name: Upload distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
